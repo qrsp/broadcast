@@ -1,10 +1,15 @@
 import argparse
 import concurrent.futures
+import functools
 import logging
+import logging.handlers
+import multiprocessing
 import os
 import re
 import shlex
 import subprocess
+import traceback
+from logging.handlers import QueueHandler
 
 import matplotlib.pyplot as plt
 import matplotlib.style as mplstyle
@@ -12,8 +17,20 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 
-def get_logger(name):
-    logger = logging.getLogger(name)
+def handle_exceptions(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kw):
+        try:
+            return f(*args, **kw)
+        except Exception:
+            traceback.print_exc()
+
+    return wrapper
+
+
+def logger_process(queue):
+    logger = logging.getLogger(os.path.basename(__file__))
+
     formatter = logging.Formatter("%(levelname)s: %(message)s")
     logger.setLevel(logging.DEBUG)
 
@@ -21,14 +38,20 @@ def get_logger(name):
     console.setLevel(logging.INFO)
     console.setFormatter(formatter)
 
-    file_log = logging.FileHandler("{}".format(name), "w", encoding="utf-8")
+    file_log = logging.FileHandler("{}".format("_compress.log"), "w", encoding="utf-8")
     file_log.setLevel(logging.DEBUG)
     file_log.setFormatter(formatter)
 
     logger.addHandler(console)
     logger.addHandler(file_log)
 
-    return logger
+    while True:
+        message = queue.get()
+        # check for shutdown
+        if message is None:
+            break
+        # log the message
+        logger.handle(message)
 
 
 def classify(data, labels):
@@ -49,6 +72,7 @@ def autopct_func(pct, iterator):
 
 
 def analysis(filepath, max_db, min_db):
+    logger = logging.getLogger(os.path.basename(__file__))
     data_dir = "data"
     filename = re.sub(r".*/(.*)\.\w+", r"\1", filepath)
 
@@ -123,7 +147,21 @@ def analysis(filepath, max_db, min_db):
     return new_result
 
 
-def main(filepath, output_dir, max_db, min_db, coverage, noise_reduce_db, goal_db):
+@handle_exceptions
+def main(
+    queue,
+    filepath,
+    output_dir,
+    max_db,
+    min_db,
+    coverage,
+    noise_reduce_db,
+    goal_db,
+):
+    logger = logging.getLogger(os.path.basename(__file__))
+    logger.addHandler(QueueHandler(queue))
+    logger.setLevel(logging.DEBUG)
+
     filename = re.sub(r".*/(.*)\.\w+", r"\1", filepath)
     logger.info(filepath)
 
@@ -150,14 +188,36 @@ def main(filepath, output_dir, max_db, min_db, coverage, noise_reduce_db, goal_d
     output = f"{output_dir}/{filename}-normalized.m4a"
     command = f'ffmpeg -i "{filepath}" -filter_complex "compand=attacks=0:points={min_db}/{new_min_db:.2f}|{x:.2f}/{x:.2f}|20/{whisper_db:.2f}:gain={gain:.2f}" -c:a aac "{output}" -y'  # noqa: E501
     logger.debug(f"[ffmpeg] {command}")
-    # args = shlex.split(command)
+    args = shlex.split(command)
 
-    # process = subprocess.Popen(
-    #     args, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    # )
-    # stdout, stderr = process.communicate()
+    process = subprocess.Popen(
+        args, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate()
 
-    # analysis(output, max_db, new_min_db)
+    analysis(filepath, max_db, min_db)
+
+
+def multiple_manager(filenames):
+    with multiprocessing.Manager() as manager:
+        queue = manager.Queue()
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as el:
+            el.submit(logger_process, queue)
+            with concurrent.futures.ProcessPoolExecutor(max_workers=4) as e:
+                for filename in filenames:
+                    e.submit(
+                        main,
+                        queue,
+                        filename,
+                        args.output,
+                        args.max,
+                        args.min,
+                        args.coverage,
+                        args.noise_reduce_db,
+                        args.goal_db,
+                    )
+
+            queue.put_nowait(None)
 
 
 if __name__ == "__main__":
@@ -181,7 +241,6 @@ if __name__ == "__main__":
         }
         args.coverage, args.noise_reduce_db = presets[args.preset]
 
-    logger = get_logger("_compress.log")
     mplstyle.use(["ggplot", "fast"])
 
     if os.path.isdir(args.input):
@@ -191,40 +250,9 @@ if __name__ == "__main__":
                 if not entry.name.startswith(".") and entry.is_file():
                     filenames.append(entry.path)
 
-        # for filename in filenames:
-        #     main(
-        #         filename,
-        #         args.output,
-        #         args.max,
-        #         args.min,
-        #         args.coverage,
-        #         args.noise_reduce_db,
-        #         args.goal_db,
-        #     )
-
-        with concurrent.futures.ProcessPoolExecutor(max_workers=5) as e:
-            for filename in filenames:
-                e.submit(
-                    main,
-                    filename,
-                    args.output,
-                    args.max,
-                    args.min,
-                    args.coverage,
-                    args.noise_reduce_db,
-                    args.goal_db,
-                )
-
+        multiple_manager(filenames)
     else:
-        main(
-            args.input,
-            args.output,
-            args.max,
-            args.min,
-            args.coverage,
-            args.noise_reduce_db,
-            args.goal_db,
-        )
+        multiple_manager([args.input])
 
     process = subprocess.Popen(
         ["notify", "Broadcast", "\n".join(filenames)], encoding="utf-8"
