@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import traceback
 from logging.handlers import QueueHandler
+from shutil import which
 
 import matplotlib.pyplot as plt
 import matplotlib.style as mplstyle
@@ -232,12 +233,17 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--preset", type=int, nargs="?")
     args = parser.parse_args()
 
+    if not which("ffmpeg") or not which("ffprobe"):
+        print("Can't find ffmpeg or ffprobe.")
+        exit(1)
+
     if args.preset:
         presets = {
             # more central, but has loud background noise
             1: (1, 5),
             # less central, but has less background noise
             2: (0.75, 7),
+            3: (0.65, 8),
         }
         args.coverage, args.noise_reduce_db = presets[args.preset]
 
