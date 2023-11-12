@@ -103,7 +103,7 @@ def analysis(filepath, max_db, min_db):
                 total.append([peak, rms])
         total = np.array(total, dtype=float)
 
-    kmeans = KMeans(n_clusters=4, random_state=0).fit(total)
+    kmeans = KMeans(n_clusters=4, random_state=0, n_init='auto').fit(total)
     labels = kmeans.labels_
 
     # pet chart
